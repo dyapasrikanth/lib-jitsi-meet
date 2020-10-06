@@ -100,6 +100,13 @@ let availableDevices;
 let availableDevicesPollTimer;
 
 /**
+ * An empty function.
+ */
+function emptyFuncton() {
+    // no-op
+}
+
+/**
  * Initialize wrapper function for enumerating devices.
  * TODO: remove this, it should no longer be needed.
  *
@@ -109,7 +116,13 @@ function initEnumerateDevicesWithCallback() {
     if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
         return callback => {
             navigator.mediaDevices.enumerateDevices()
-                .then(callback, () => callback([]));
+                .then(devices => {
+                    updateKnownDevices(devices);
+                    callback(devices);
+                }, () => {
+                    updateKnownDevices([]);
+                    callback([]);
+                });
         };
     }
 }
@@ -321,11 +334,13 @@ function getConstraints(um, options = {}) {
             // Provide constraints as described by the electron desktop capturer
             // documentation here:
             // https://www.electronjs.org/docs/api/desktop-capturer
+            // Note. The documentation specifies that chromeMediaSourceId should not be present
+            // which, in the case a users has multiple monitors, leads to them being shared all
+            // at once. However we tested with chromeMediaSourceId present and it seems to be
+            // working properly and also takes care of the previously mentioned issue.
             constraints.audio = { mandatory: {
                 chromeMediaSource: constraints.video.mandatory.chromeMediaSource
             } };
-
-            delete constraints.video.mandatory.chromeMediaSourceId;
         }
     }
 
@@ -619,6 +634,23 @@ function sendDeviceListToAnalytics(deviceList) {
     });
 }
 
+
+/**
+ * Update known devices.
+ *
+ * @param {Array<Object>} pds - The new devices.
+ * @returns {void}
+ *
+ * NOTE: Use this function as a shared callback to handle both the devicechange event  and the polling implementations.
+ * This prevents duplication and works around a chrome bug (verified to occur on 68) where devicechange fires twice in
+ * a row, which can cause async post devicechange processing to collide.
+ */
+function updateKnownDevices(pds) {
+    if (compareAvailableMediaDevices(pds)) {
+        onMediaDevicesListChanged(pds);
+    }
+}
+
 /**
  * Event handler for the 'devicechange' event.
  *
@@ -815,7 +847,7 @@ class RTCUtils extends Listenable {
             logger.info(`Disable HPF: ${disableHPF}`);
         }
 
-        availableDevices = undefined;
+        availableDevices = [];
         window.clearInterval(availableDevicesPollTimer);
         availableDevicesPollTimer = undefined;
 
@@ -893,27 +925,15 @@ class RTCUtils extends Listenable {
                     RTCEvents.DEVICE_LIST_AVAILABLE,
                     availableDevices);
 
-
-                // Use a shared callback to handle both the devicechange event
-                // and the polling implementations. This prevents duplication
-                // and works around a chrome bug (verified to occur on 68) where
-                // devicechange fires twice in a row, which can cause async post
-                // devicechange processing to collide.
-                const updateKnownDevices = () => this.enumerateDevices(pds => {
-                    if (compareAvailableMediaDevices(pds)) {
-                        onMediaDevicesListChanged(pds);
-                    }
-                });
-
                 if (browser.supportsDeviceChangeEvent()) {
                     navigator.mediaDevices.addEventListener(
                         'devicechange',
-                        updateKnownDevices);
+                        () => this.enumerateDevices(emptyFuncton));
                 } else {
                     // Periodically poll enumerateDevices() method to check if
                     // list of media devices has changed.
                     availableDevicesPollTimer = window.setInterval(
-                        updateKnownDevices,
+                        () => this.enumerateDevices(emptyFuncton),
                         AVAILABLE_DEVICES_POLL_INTERVAL_TIME);
                 }
             });
